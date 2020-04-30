@@ -410,57 +410,80 @@ bool FlyingPlatform::isRunning() {
 
 fp_Point3D FlyingPlatform::newTarget() {
     fp_Point3D here = where();
-    // Figure y and z intercepts
+    // Figure y intercept
     float by = here.y - (hSlope[hHeading] * here.x);
-    float bz = here.z - vSlope[vHeading] * sqrt(here.x * here.x + here.y * here.y);
 
     // Assume we'll aim to hit the left or right wall (i.e., along the x axis)
     float x = fp_xIsRising(hHeading) ? marginsMax.x : marginsMin.x;
     float y = hSlope[hHeading] * x + by;
-    float z = vSlope[vHeading] * sqrt(x * x + y * y) + bz;
 
     // If that would result in hitting the front or back, assume that's what we hit
     if (y < marginsMin.y || y > marginsMax.y) {
         y = y < marginsMin.y ? marginsMin.y : marginsMax.y;
         x = (y - by) / hSlope[hHeading];
-        z = vSlope[vHeading] * sqrt(x * x + y * y) + bz;
     }
 
+    // Calculate what z would be based on x and y. It's z = vSlope[vHeading] * (+-sqrt(x**2 + y**2)) + bz
+    // Whic it is depends on whether the horoizontal motion is getting closer to or farther from the origin
+    float bz;
+    if ((here.x * here.x + here.y * here.y) - (x * x + y * y) <= 0) {   // If horizontal motion is heading away from origin
+            bz = here.z - vSlope[vHeading] * sqrt(here.x * here.x + here.y * here.y);
+        } else {                                                        // Otherwise horizontal motion is heading towards origin
+            bz = here.z + vSlope[vHeading] * sqrt(here.x * here.x + here.y * here.y);
+        }
+    float z = vSlope[vHeading] * sqrt(x * x + y * y) + bz;
+
+    // Should not happen
+    if ((vHeading < FP_LEVEL && z > here.z) || (vHeading > FP_LEVEL && z < here.z)) {
+        Serial.print(F("newTarget(): Wrong vertical direction. here: ("));
+        Serial.print(here.x);
+        Serial.print(F(", "));
+        Serial.print(here.y);
+        Serial.print(F(", "));
+        Serial.print(here.z);
+        Serial.print(F("), target: ("));
+        Serial.print(x);
+        Serial.print(F(", "));
+        Serial.print(y);
+        Serial.print(F(", "));
+        Serial.print(z);
+        Serial.print(F("), hSlope: "));
+        Serial.print(hSlope[hHeading]);
+        Serial.print(F(", vSlope: "));
+        Serial.print(vSlope[vHeading]);
+        Serial.print(F(", by: "));
+        Serial.print(by);
+        Serial.print(F(", bz: "));
+        Serial.println(bz);
+    }
     //If that would result in hitting the top or bottom, go for that, instead.
     if (z < marginsMin.z || z > marginsMax.z) {
         z = z < marginsMin.z ? marginsMin.z : marginsMax.z;
-        // The formula for computing x from z, my, mz, by and bz is pretty horrible:
-        // x = -my * by + sqrt(4 * my**2 * by**2 - 4 * (my**2 + 1) * (by**2 - (z - bz)**2 / mz**2)) / (my**2 + 1)
-        // It's the solution in x to y = my * x + by and z = mz * sqrt(x**2 + y**2) + bz using the
-        // quadratic equation.
-        float discriminant = 4 * hSlope[hHeading] * hSlope[hHeading] * (by * by) - 
-            4 * (hSlope[hHeading] * hSlope[hHeading] + 1) * 
-            ((by * by) - ((z - bz) * (z - bz)) / (vSlope[vHeading] * vSlope[vHeading]));
-        if (discriminant < 0.0) {
-            Serial.print(F("Discriminant in top-bottom target calculation is "));
-            Serial.print(discriminant);
-            Serial.print(F(". here: ("));
-            Serial.print(here.x);
-            Serial.print(F(", "));
-            Serial.print(here.y);
-            Serial.print(F(", "));
-            Serial.print(here.z);
-            Serial.print(F("), hSlope: "));
-            Serial.print(hSlope[hHeading]);
-            Serial.print(F(", vSlope: "));
-            Serial.print(vSlope[vHeading]);
-            Serial.print(F(", by: "));
-            Serial.print(by);
-            Serial.print(F(", bz: "));
-            Serial.print(bz);
-            Serial.println(F(".\nGood luck with that."));
-            while (1) {
-                // Halt: Don't risk crashing mechanism.
-            }
-        }
-        x = -hSlope[hHeading] * by + sqrt(discriminant) / 
-            (hSlope[hHeading] * hSlope[hHeading] + 1);
-        y =  hSlope[hHeading] * x + by;
+        // The distance in the horizontal plane from (here.x, here.y) to the point in x-y where we would
+        // go outside the flying area given z, here.z and vSlope is d = (z - here.z) / vSlope.
+        // The square of the same distance in terms of x, here.x, y and here.y is 
+        // d**2 = (x - here.x)**2 + (y - here.y)**2. We also know (y - here.y) / (x - here.x) = hSlope.
+        // With these and some algebra we can solve for x in terms of z: 
+        // (z - here.z) / (sqrt(hSlope**2 + 1) * vSlope) + here.x
+        x = (z - here.z) / (sqrt(hSlope[hHeading] * hSlope[hHeading] + 1) * vSlope[vHeading]) + here.x;
+        y =  hSlope[hHeading] * (x - here.x) + here.y;
+        Serial.print(F("newTarget() off bottom or top. here: ("));
+        Serial.print(here.x);
+        Serial.print(F(", "));
+        Serial.print(here.y);
+        Serial.print(F(", "));
+        Serial.print(here.z);
+        Serial.print(F("), hSlope: "));
+        Serial.print(hSlope[hHeading],6);
+        Serial.print(F(", vSlope: "));
+        Serial.print(vSlope[vHeading],6);
+        Serial.print(F(", new target: ("));
+        Serial.print(x);
+        Serial.print(F(", "));
+        Serial.print(y);
+        Serial.print(F(", "));
+        Serial.print(z);
+        Serial.println(F(")."));
     }
     #ifdef FP_DEBUG_NT
     Serial.print(F("newTarget() here: ("));
