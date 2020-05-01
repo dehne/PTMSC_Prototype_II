@@ -37,7 +37,7 @@
 #include "UserInput.h"
 #include "ControlPad.h"
 
-#define DEBUG                       // Uncomment to turn on debugging messages
+//#define DEBUG                       // Uncomment to turn on debugging messages
 
 // For the stepper motors
 #define PIN_0D        (2)
@@ -253,10 +253,11 @@ void onWhere() {
 
 // toForward
 void onToForward() {
-  fp_return_code rc = diver.go();
   #ifdef DEBUG
   Serial.print(F("cp: Forward. "));
-  interpretRc(rc);
+  interpretRc(diver.go());
+  #else
+  diver.go();
   #endif
 }
 
@@ -270,55 +271,61 @@ void onToStop() {
 
 // toLeft
 void onToLeft() {
-  fp_return_code rc = diver.turn(fp_left);
   #ifdef DEBUG
   Serial.print(F("cp: Left. "));
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_left));
+  #else
+  diver.turn(fp_left);
   #endif
 }
 
 // toNeutral
 void onToNeutral() {
-  fp_return_code rc = diver.turn(fp_straight);
   #ifdef DEBUG
   Serial.print(F("cp: Neutral. "));
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_straight));
+  #else
+  diver.turn(fp_straight);
   #endif
 }
 
 // toRight
 void onToRight() {
-  fp_return_code rc = diver.turn(fp_right);
   #ifdef DEBUG
   Serial.print(F("cp: Right. "));
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_right));
+  #else
+  diver.turn(fp_right);
   #endif
 }
 
 // downPressed
 void onDownPressed() {
-  fp_return_code rc = diver.turn(fp_falling);
   #ifdef DEBUG
   Serial.print(F("cp: Falling. "));
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_falling));
+  #else
+  diver.turn(fp_falling);
   #endif
 }
 
 // downReleased or upReleased
 void onUpOrDownReleased() {
-  fp_return_code rc = diver.turn(fp_level);
   #ifdef DEBUG
   Serial.print("cp: Level. ");
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_level));
+  #else
+  diver.turn(fp_level);
   #endif
 }
 
 // upPressed
 void onUpPressed() {
-  fp_return_code rc = diver.turn(fp_rising);
   #ifdef DEBUG
   Serial.print(F("cp: Rising. "));
-  interpretRc(rc);
+  interpretRc(diver.turn(fp_rising));
+  #else
+  diver.turn(fp_rising);
   #endif
 }
 
