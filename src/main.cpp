@@ -37,7 +37,7 @@
 #include "UserInput.h"
 #include "ControlPad.h"
 
-//#define DEBUG                       // Uncomment to turn on debugging messages
+#define DEBUG                       // Uncomment to turn on debugging messages
 
 // For the stepper motors
 #define PIN_0D        (2)
@@ -72,7 +72,7 @@
 // Conversion between mm and steps. (The FlyingPlatform deals exclusively in steps.)
 #define STEPS_PER_REV (400.0)       // What it sounds like
 #define MM_PER_REV (31.51)          // Millimeters of wire travel per revolution
-#define STEPS_PER_MM  (STEPS_PER_REV / MM_PER_REV)
+#define STEPS_PER_MM  (STEPS_PER_REV / MM_PER_REV)  // For 400 / 31.51 that's 12.694
 #define mmToSteps(mm)       ((long)((mm) * STEPS_PER_MM))
 #define stepsToMm(steps)    ((long)((steps) / STEPS_PER_MM))
 
@@ -228,8 +228,7 @@ void onTurn() {
 
 // w and where
 void onWhere() {
-  fp_Point3D loc;
-  loc = diver.where();
+  fp_Point3D loc = diver.where();
   Serial.print(F("Diver is located at: ("));
   Serial.print(stepsToMm(loc.x));
   Serial.print(F(", "));

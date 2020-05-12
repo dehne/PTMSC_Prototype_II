@@ -18,7 +18,7 @@
  * 
  *****
  * 
- * FlyingPlatform V0.1, April 2020
+ * FlyingPlatform V0.3, May 2020
  * Copyright (C) 2020 D.L. Ehnebuske
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -54,9 +54,12 @@
      * Uncomment to turn on debugs
      * 
      **/
+    //#define FP_DEBUG_ISR        // ISR (A bunch of it is in run())
     //#define FP_DEBUG_RU         // run()
     //#define FP_DEBUG_MT         // moveTo()
+    //#define FP_DEBUG_MB         // moveBy()
     //#define FP_DEBUG_NT         // newTarget()
+    //#define FP_DEBUG_W          // where()
     #define FP_DEBUG_LED        // Use LED on pin A5 to show stepper(s) running
 
     /**
@@ -70,6 +73,9 @@
     #define FP_N_VHEADINGS      (11)        // Number of vertical headings
     #define FP_LEVEL            (5)         // The vertical heading for fp_level
     #define FP_TURN_INTERVAL    (250000)    // Heading change interval (in μs)
+    #define FP_MAX_JITTER       (50)        // Maximum jitter (μs) in dispatching a step
+    #define FP_STARTING_COUNT   (0X40)      // OCR0A count value for first interrupt
+
 
     /**
      * 
@@ -285,9 +291,8 @@
 
             /**
              * 
-             * Start the motors running to move the platform from its current 
-             * location by the amount indicated. This is non blocking; the 
-             * actual movement occurs over time ar run() is repeatedly 
+             * Kick off the process of moving to tgt. This is non-blocking; the 
+             * actual work occurs over time as run() and the ISR are repeatedly 
              * invoked. If moveTo() is invoked while the platform is moving, 
              * its journey is rerouted from whatever it was to the new 
              * destination.
@@ -399,53 +404,41 @@
              **/
             bool isRunning();
 
-
         private:
 
             /**
              * 
              * Based on current position and on hHeading and vHeading, 
-             * return a fp_Point3D of the corresopnding target.
+             * return a fp_Point3D of the corresopnding target. The target is 
+             * the point on one of the planes formed by the margins which we 
+             * will eventually hit if we move from where we are along a 
+             * straight path described by hHeading and vHeading.
              * 
              * NB: The code assumes that currentIsSet but, for efficiency 
-             * doesn't check, so be careful clling it.
+             * doesn't check, so be careful calling it.
              * 
              **/
             fp_Point3D newTarget();
 
-            byte dirPin[4];                     // Direction digital output pins. High means lengthen cables
-            byte stepPin[4];                    // Step digital output pins. Normally LOW. Pulse HIGH to step.
             byte enablePin;                     // Common pin to enable/disable motor drivers. Active LOW.
 
             fp_Point3D space;                   // The right, back, top corner of the flying space
             fp_Point3D marginsMin;              // Safety margins minimum values (left, front, bottom)
             fp_Point3D marginsMax;              // Safety margins maximum values (right, back, top)
+            long batchSteps;                    // The length along the direction of motion, in steps, of a batch
 
             fp_Point3D target;                  // Where we're trying to go
             fp_Point3D source;                  // Where we're coming from
-            long cableSteps[4];                 // The current length of the cables, in steps
-            bool shortening[4];                 // Whether the cable is shortening or lengthening
-            long pendingSteps[4];               // Number of remaining steps by which to change each cable
-            unsigned long dsMicros[4];          // micros() at start of last step for given motor
-            unsigned long dsInterval[4];        // Interval (μs) between steps for given motor
-            float my, by, mz, bz;               // slope in x-y, y-intercept, slope in x-z, z-intercept
-            float moveLength;                   // Move length in steps
-            long batchSteps;                    // The length, in steps, of a batch
+            float nextCableSteps[4];            // Cable lengths at the beginning of next batch of steps
             float dt;                           // Fraction of the move a batch is
             float t;                            // How far along we are in the move [0..1]
 
             bool newMove;                       // True if a new move has been set but not started
-            bool stopping;                      // True is waiting for the current batch to finish so we can stop
-            byte nextBatchPhase;                // The current phase of the next batch calculation
-            float nextT;                        // t for the next batch of steps
-            float xsts, sxxsts;                 // x(nextT)**2 and (space.x - x(nextT))**2
-            float ysts, syysts;                 // y(nextT)**2 and (space.y - y(nextT))**2
-            float szzsts;                       // (space.z - z(nextT))**2
-            float nextCableSteps[4];            // Cable lengths for next batch of steps
+            bool stopping;                      // True if waiting for the current batch to finish so we can stop
 
             float maxSpeed;                     // Max speed in steps per second.
             bool currentIsSet;                  // Whether cableSteps[] has been initialized
-            bool isEnabled;                     // WHether motor drivers are enabled
+            bool isEnabled;                     // Whether motor drivers are enabled
 
             /**
              * 
