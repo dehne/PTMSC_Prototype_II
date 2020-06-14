@@ -2,10 +2,10 @@
  * 
  * This file is a portion of the package FlyingPlatform, a library that 
  * provides an Arduino sketch with the ability to control four stepper motors 
- * that operate a "flying camera" setup in which a platform is connected by 
- * cables to four stepper-motor-controlled winches. By judiciously reeling in 
- * and letting out the cables, the platform can be moved around in three 
- * space.
+ * (through stepper motor drivers) to operate a "flying camera" setup in which 
+ * a platform is connected by cables to four stepper-motor-controlled winches. 
+ * By judiciously reeling in and letting out the cables, the platform can be 
+ * moved around in three space.
  * 
  * The origin of the coordinate system is at the lower, front, left corner of 
  * a rectangular prism with its faces parallel to the axes. This prism is 
@@ -15,6 +15,46 @@
  * moved by one step. The winches are designed so that the length of a step is 
  * constant. The winches are located at the four top corners of the flying 
  * space.
+ * 
+ * The flying space is buffered by "safety margins." That is, the platform is
+ * not allowed to be driven right to the edge of the flying space because it 
+ * would crash into the mechanism or some other obstacle. Instead it may only 
+ * be driven in the volume set by setSafetyMargins(). And, because of the 
+ * non-linearities involved in translating straight line paths in the flying 
+ * space into cable pulls, we only target going places in a slightly smaller 
+ * space set internally and defined in targetsMin and targetsMax.
+ * 
+ * Initialization is in two parts. At the time the FlyingPlatform object is 
+ * constructed, the basic physical parameters is set -- I/O pins and flying 
+ * space size. Then when the sketch's setup() is run, the begin() member 
+ * function must be invoked to do the rest of the initialization. Once 
+ * initialization is complete, the basic operation is in three parts. 
+ * 
+ * First, there is an ISR that's driven by the hardware Timer 2. It executes 
+ * whenever the value in Timer 2 equals the value in register OCR2A. The ISR 
+ * adjusts the value in OCR2A to cause interrupts to happen as needed to drive 
+ * the stepper motors. Note that because we comandeer Timer 2, it can't be 
+ * used for anything else. In particular, this is the timer that the Arduino 
+ * tone() function uses, so don't use tone() in sketches using FlyingPlatform. 
+ * 
+ * Anyway, the ISR is what actually sends direction and step signals 
+ * to the winch stepper motor drivers. It gets its marching orders from the 
+ * second part of the basic operation, the run() member function. 
+ * 
+ * A call to run() should be placed in the loop() function of the sketch. It 
+ * needs to be invoked often. Run does the calculations that turn moves in 
+ * 3-space into cable length-change instructions. It places these in 
+ * nextPendingSteps, nextShortening and nextDsInterval. nextPendingSteps is a 
+ * count of the steps to be taken by each of the motors, and nextShortening 
+ * tells whether each cable is to be lengthened or shortened. And 
+ * nextDsInterval says how many μs there should be between steps. The ISR and 
+ * run() coordinate their use of these buffers through the semaphore 
+ * nextReady.
+ * 
+ * The third component of the basic operation are the other member functions. 
+ * The sketch invokes these as needed to request moves in 3-space, to set 
+ * operational parameters and to get information about the state of the 
+ * FlyingPlatform.
  * 
  *****
  * 
@@ -55,11 +95,11 @@
      * 
      **/
     //#define FP_DEBUG_ISR        // ISR (A bunch of it is in run())
+    #define FP_DEBUG_GEO        // Wacky geometry checking
     //#define FP_DEBUG_RU         // run()
     //#define FP_DEBUG_MT         // moveTo()
     //#define FP_DEBUG_MB         // moveBy()
     //#define FP_DEBUG_NT         // newTarget()
-    //#define FP_DEBUG_W          // where()
     #define FP_DEBUG_LED        // Use LED on pin A5 to show stepper(s) running
 
     /**
@@ -73,8 +113,8 @@
     #define FP_N_VHEADINGS      (11)        // Number of vertical headings
     #define FP_LEVEL            (5)         // The vertical heading for fp_level
     #define FP_TURN_INTERVAL    (250000)    // Heading change interval (in μs)
-    #define FP_MAX_JITTER       (50)        // Maximum jitter (μs) in dispatching a step
-    #define FP_STARTING_COUNT   (0X40)      // OCR0A count value for first interrupt
+    #define FP_MAX_JITTER       (25)        // Maximum jitter (μs) in dispatching a step
+    #define FP_TARGETS_BUFFER   (100)       // Number of steps between a target and a margin
 
 
     /**
@@ -94,7 +134,7 @@
 
     /**
      * 
-     * Representation of a point in the flying space
+     * Cartesian representation of a point in the flying space
      * 
      **/
     struct fp_Point3D {
@@ -103,6 +143,14 @@
         long z;
     };
 
+    /**
+     * 
+     * Cable bundle representation of a point in the flying space
+     * 
+     **/
+    struct fp_CableBundle {
+        long c[4];              // The lengths of the cables
+    };
 
     /**
      * 
@@ -147,7 +195,7 @@
              *  pin4P
              *  pinEn       Enable pin -- common to all steppers. Active low.
              *  spaceWidth  The width, in steps, of the space in which the 
-             *              flyer operates
+             *              platform operates
              *  spaceDepth  Its depth
              *  spaceHeight Its height
              * 
@@ -170,7 +218,7 @@
 
             /**
              * 
-             * Have the FlyerPLATFORM object do its thing running the motors. 
+             * Have the FlyerPlatform object do its thing running the motors. 
              * Put an invocation of this in the sketch's loop() function.
              * 
              * Returns true if any of the motors still have steps to go; false 
@@ -182,7 +230,7 @@
             /**
              * 
              * Set the maximum speed, in steps per second, at which we're 
-             * allowed to emit step pulses. Defaults to 800.
+             * allowed to emit step pulses. Defaults to FP_MAX_SPEED.
              * 
              **/
             void setMaxSpeed(float speed);
@@ -192,21 +240,21 @@
              * Set the safety margins, the distances from each of the sides of 
              * the flying space from which the platform is excluded. Setting
              * these keeps the platform from accidententally crashing into 
-             * something and from overstressing the mechanism. This is 
+             * parts of the mechanism that protrude into the flying space and 
+             * from overstressing the mechanism. The overstressing part is 
              * particularly important for the top of the flying space since 
              * getting near to the top puts considerable strain on the cables.
-             * Before this is called, the platform can be positioned at any 
-             * location in the flying space.
+             * Before this is called, the margins are all 0.
              * 
              * Parameters
              *  leftMargin      The platform's x coordinate must be more than 
-             *                  this.
-             *  rightMargin     The platform's y coordinate must be less than
-             *                  this.
-             *  frontMargin     Same for minimum y
-             *  backMargin      Same for maximum y
-             *  bottomMargin    Same for minimum z
-             *  topMargin       Same for maximum z
+             *                  leftMargin.
+             *  rightMargin     The platform's x coordinate must be less than
+             *                  (space.x - rightMargin).
+             *  frontMargin     Analogous, but for minimum y
+             *  backMargin      Analogous, but for maximum y
+             *  bottomMargin    Analogous, but for minimum z
+             *  topMargin       Analogous, but for maximum z
              * 
              * Returns fp_ok if all went well, fp_oob if the specified margins 
              * would cause the platform's current position to be out of 
@@ -221,10 +269,12 @@
             /**
              * 
              * Set the batch size, the length, in steps, of of a batch of 
-             * steps. A shorter integration interval causes the deviation 
-             * from a straight line the path the platform takes to diminish, 
-             * but it increases the computational load substantially. Maybe 
-             * something about a cm in size. Defaults to 128 steps.
+             * steps. This controls the integration interval used to get the 
+             * flyer approximate straight tracks through 3-space as it moves. 
+             * A shorter integration interval causes the deviation from a 
+             * straight line the path the platform takes to diminish, 
+             * but it increases the computational load. Maybe something about 
+             * a cm in size? Defaults to 128 steps.
              * 
              **/
             void setBatchSize(long steps);
@@ -238,8 +288,9 @@
              * hHeading to 0, vHeading to FD_LEVEL.
              * 
              * Returns fp_ok if all went well, fp_oob if the specified 
-             * position is out of bounds of the flying space, including the
-             * safety margins. No change to the current location is made.
+             * position is out of bounds of the safety margins or fp_mov if the 
+             * platform is currently moving. No change to the current location 
+             * is made if fp_ok is not returned.
              * 
              **/
             fp_return_code setCurrentPosition (fp_Point3D tgt);
@@ -269,19 +320,19 @@
 
             /**
              * 
-             * Start the motors running to move the platform from its current 
-             * location to the position indicated. This is non blocking; the 
-             * actual movement occurs over time ar run() is repeatedly 
-             * invoked. If moveTo() is invoked while the platform is moving, 
-             * its journey is rerouted from whatever it was to the new 
-             * destination.
+             * Set things up so the platform will move to tgt. This call is 
+             * non-blocking; the actual movement occurs over time as run() is 
+             * repeatedly invoked and the ISR issues steps. If moveTo() is 
+             * invoked while the platform is moving, its journey is rerouted 
+             * from whatever it was to the new destination. If the plaform is 
+             * stopped, it will start moving.
              * 
              * Returns 
              *      fp_ok   if successful. 
-             *      fp_oob  if the specified position is outside the flying 
-             *              space (including the safety margins). In this case 
-             *              the platform will stop if it was moving or remain 
-             *              at rest if it wasn't. 
+             *      fp_oob  if the specified position is outside the safety 
+             *              margins. In this case the platform will continue 
+             *              on its path if it was moving or remain at rest if 
+             *              it wasn't. 
              *      fp_ncp  if the current position hasn't been set. (No 
              *              movement happens.)
              *      fp_dis  if the motors are disabled. (No movement.)
@@ -291,18 +342,19 @@
 
             /**
              * 
-             * Kick off the process of moving to tgt. This is non-blocking; the 
-             * actual work occurs over time as run() and the ISR are repeatedly 
-             * invoked. If moveTo() is invoked while the platform is moving, 
-             * its journey is rerouted from whatever it was to the new 
-             * destination.
+             * Kick off the process of moving by delta from the current 
+             * location. This is non-blocking; the actual work occurs over 
+             * time as run() and the ISR are repeatedly invoked. If moveBy() 
+             * is invoked while the platform is moving, its journey is 
+             * rerouted from whatever it was to the new destination. If the
+             * platform is stopped, it will start moving.
              * 
              * Returns 
              *      fp_ok   if successful. 
-             *      fp_oob  if the specified position is outside the flying 
-             *              space (including the safety margins). In this case 
-             *              the platform will stop if it was moving or remain 
-             *              at rest if it wasn't. 
+             *      fp_oob  if the specified position is outside the safety 
+             *              margins. In this case the platform will continue 
+             *              on its path if it was moving or remain at rest if 
+             *              it wasn't. 
              *      fp_ncp  if the current position hasn't been set. (No 
              *              movement happens.)
              *      fp_dis  if the motors are disabled. (No movement.)
@@ -328,7 +380,7 @@
              * have the values fp_rising, fp_level, or fp_falling. if it is 
              * fp_rising, the vHeading increases once every FP_TURN_INTERVAL 
              * until it reaches its maximum value. If it is fp_falling, it
-             * decreases in the sam way until it reaches 0. If it is fp_level 
+             * decreases in the same way until it reaches 0. If it is fp_level 
              * it either increases or decreases every FP_TURN_INTERVAL until 
              * it reaches FP_LEVEL, at which point it stops changing.
              *
@@ -344,8 +396,8 @@
             /**
              * 
              * Change how the platform moves in the x-y direction. You can 
-             * only change direction while moving. If not moving nothing 
-             * changes, but you get a fp_nom return code.
+             * change direction while moving or not moving. If not moving the 
+             * turning direction changes, but motion doesn't start.
              * 
              * See go() for details on how turns work.
              * 
@@ -354,8 +406,7 @@
              *              fp_right
              * 
              * Returns 
-             *      fp_ok   if successful. 
-             *      fp_nom  if no move is underway
+             *      fp_ok   always
              * 
              **/
             fp_return_code turn(fp_hTurns dir);
@@ -363,8 +414,8 @@
             /**
              * 
              * Change how the platform moves in the z direction. You can 
-             * only change direction while moving. If not moving nothing 
-             * changes, but you get a fp_nom return code.
+             * change direction while moving or not moving. If not moving the 
+             * turning direction changes, but motion doesn't start.
              * 
              * See go() for details on how turns work.
              * 
@@ -374,14 +425,14 @@
              * 
              * Returns 
              *      fp_ok   if successful. 
-             *      fp_nom  if no move is underway
              * 
              **/
             fp_return_code turn(fp_vTurns dir);
 
             /**
              * 
-             * Stop all the motors as quickly as possible.
+             * Stop all the motors as soon as the currently queued steps have 
+             * been processed by the ISR.
              * 
              **/
             void stop();
@@ -389,6 +440,10 @@
             /**
              * 
              * Return the platform's current location in the flying space.
+             * 
+             * NB: If the platform is moving, the location returned is the 
+             * actual location at the time of the call, and the platform
+             * continues to move.
              * 
              * Returns fp_Point3D {-1, -1, -1} if current position hasn't 
              * been set.
@@ -408,11 +463,15 @@
 
             /**
              * 
-             * Based on current position and on hHeading and vHeading, 
-             * return a fp_Point3D of the corresopnding target. The target is 
-             * the point on one of the planes formed by the margins which we 
-             * will eventually hit if we move from where we are along a 
-             * straight path described by hHeading and vHeading.
+             * Based on the starting position -- the position the platform 
+             * will occupy when it could next make a change in direction -- 
+             * and on hHeading and vHeading, return a fp_Point3D of the 
+             * corresopnding target. 
+             * 
+             * The target is the point where the line from the starting point 
+             * and proceeding in the direction described by hHeading and 
+             * vHeading first intersect one of the six planes described by 
+             * targetsMin and targetsMax.
              * 
              * NB: The code assumes that currentIsSet but, for efficiency 
              * doesn't check, so be careful calling it.
@@ -420,16 +479,32 @@
              **/
             fp_Point3D newTarget();
 
+            /**
+             * 
+             * Convert a fp_CableBundle to the corresponding fp_Point3D
+             * 
+             **/
+            fp_Point3D cbToP3D(fp_CableBundle bundle);
+
+            /**
+             * 
+             * Convert an fp_Point3D to the corresponding fp_CableBundle
+             * 
+             **/
+            fp_CableBundle p3DToCb(fp_Point3D point);
+
             byte enablePin;                     // Common pin to enable/disable motor drivers. Active LOW.
 
             fp_Point3D space;                   // The right, back, top corner of the flying space
             fp_Point3D marginsMin;              // Safety margins minimum values (left, front, bottom)
             fp_Point3D marginsMax;              // Safety margins maximum values (right, back, top)
+            fp_Point3D targetsMin;              // Target minimum values (left, front,bottom)
+            fp_Point3D targetsMax;              // Target maximum values (right, back, top)
             long batchSteps;                    // The length along the direction of motion, in steps, of a batch
 
             fp_Point3D target;                  // Where we're trying to go
             fp_Point3D source;                  // Where we're coming from
-            float nextCableSteps[4];            // Cable lengths at the beginning of next batch of steps
+            fp_CableBundle nextCableSteps;      // Cable lengths at the beginning of next batch of steps
             float dt;                           // Fraction of the move a batch is
             float t;                            // How far along we are in the move [0..1]
 

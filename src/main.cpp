@@ -49,20 +49,20 @@
 #define PIN_3D        (11)
 #define PIN_3P        (12)
 #define PIN_EN        (13)
-#define MAX_SPEED     (600)         // In steps per second
+#define MAX_SPEED     (500)         // In steps per second
 
 // Physical size of flying space (mm) measured from floor and between hoist points
 #define SIZE_X        (950)
 #define SIZE_Y        (565)
 #define SIZE_Z        (753)
 
-// Safety margins
+// Safety margins (mm) for left, right, front, back, down and up
 #define MARGIN_L      (25)
-#define MARGIN_R      (SIZE_X - 25)
+#define MARGIN_R      (25)
 #define MARGIN_F      (20)
-#define MARGIN_B      (SIZE_Y - 20)
+#define MARGIN_B      (20)
 #define MARGIN_D      (20)
-#define MARGIN_U      (SIZE_Z - 20)
+#define MARGIN_U      (20)
 
 // Home location
 #define HOME_X        (474)
@@ -105,7 +105,7 @@ void interpretRc(int8_t rc) {
       Serial.println(F("Ok."));
       break;
     case fp_oob:
-      Serial.println(F("Move would result in going out of bounds."));
+      Serial.println(F("Result would be out of bounds."));
       break;
     case fp_ncp:
       Serial.println(F("Can't move. Home position not set."));
