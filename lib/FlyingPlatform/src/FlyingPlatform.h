@@ -100,7 +100,8 @@
     //#define FP_DEBUG_MT         // moveTo()
     //#define FP_DEBUG_MB         // moveBy()
     //#define FP_DEBUG_NT         // newTarget()
-    #define FP_DEBUG_LED        // Use LED on pin A5 to show stepper(s) running
+    #define FP_DEBUG_MTR        // Use LED on pin A5 to show stepper(s) running
+    //#define FP_DEBUG_LED          // Using LED on A5 in an ad hoc manner for debugging
 
     /**
      * 
@@ -113,7 +114,7 @@
     #define FP_N_VHEADINGS      (11)        // Number of vertical headings
     #define FP_LEVEL            (5)         // The vertical heading for fp_level
     #define FP_TURN_INTERVAL    (250000)    // Heading change interval (in μs)
-    #define FP_MAX_JITTER       (25)        // Maximum jitter (μs) in dispatching a step
+    #define FP_MAX_JITTER       (75)        // Maximum jitter (μs) in dispatching a step
     #define FP_TARGETS_BUFFER   (100)       // Number of steps between a target and a margin
 
 
@@ -122,6 +123,8 @@
      * Macros
      * 
      **/
+
+    // True if, while on this heading, x rises with the passage of time. False otheriwse.
     #define fp_xIsRising(hh)     (hh < FP_N_HHEADINGS / 4 || hh >  3 * (FP_N_HHEADINGS / 4))
 
     /**
@@ -505,6 +508,7 @@
             fp_Point3D target;                  // Where we're trying to go
             fp_Point3D source;                  // Where we're coming from
             fp_CableBundle nextCableSteps;      // Cable lengths at the beginning of next batch of steps
+            fp_Point3D nextPoint;               // The FP_Point3D corresponding to nextCableSteps
             float dt;                           // Fraction of the move a batch is
             float t;                            // How far along we are in the move [0..1]
 
@@ -519,21 +523,25 @@
              * 
              * In addition to its position, the flying platform has horizontal 
              * (x-y) and vertical (z along the x-y path) headings.
-             * hSlope is the list slopes (the m in y = mx + b) for the 40 
-             * possible horizontal headings. Basically they are tan(heading) 
-             * spaced equally. There are 40 of them so they are 9 degrees apart.
-             * Note that they avoid an infinite slope; the code relies on this
+             * hSlope is the list of slopes (the m in y = mx + b) for the 40 
+             * possible horizontal headings. 
+             * 
+             * The values are tan(4.5 + 9 * heading / 360). That way we avoid
+             * slopes of 0 and ∞.
+             *
+             * NB: To simplify things, the code relies on non-zero and 
+             * non-infinite values for slope.
              * 
              **/
             float hSlope[FP_N_HHEADINGS] =
-            {0,             0.1583844403, 0.3249196962,  0.5095254495,  0.726542528, 
-             1,             1.37638192,   1.962610506,   3.077683537,   6.313751515, 
-             1.63312E+16,  -6.313751515, -3.077683537,  -1.962610506,  -1.37638192,
-            -1,            -0.726542528, -0.5095254495, -0.3249196962, -0.1583844403, 
-             0,             0.1583844403, 0.3249196962,  0.5095254495,  0.726542528, 
-             1,             1.37638192,   1.962610506,   3.077683537,   6.313751515, 
-             5.44375E+15,  -6.313751515, -3.077683537,  -1.962610506,  -1.37638192, 
-             -1,           -0.726542528, -0.5095254495, -0.3249196962, -0.1583844403};
+            {  0.07870170682, 0.2400787591,  0.4142135624,  0.6128007881,  0.8540806855, 
+               1.170849566,   1.631851687,   2.414213562,   4.16529977,   12.70620474,
+             -12.70620474,   -4.16529977,   -2.414213562,  -1.631851687,  -1.170849566,
+              -0.8540806855, -0.6128007881, -0.4142135624, -0.2400787591, -0.07870170682,
+               0.07870170682, 0.2400787591,  0.4142135624,  0.6128007881,  0.8540806855,
+               1.170849566,   1.631851687,   2.414213562,   4.16529977,   12.70620474,
+             -12.70620474,   -4.16529977,   -2.414213562,  -1.631851687,  -1.170849566,
+              -0.8540806855, -0.6128007881, -0.4142135624, -0.2400787591, -0.07870170682};
             int hHeading;                       // Which slope the diver is currently on
             fp_hTurns hChange;                  // How hHeading is changing fp_left, fp_straight, fp_right
 

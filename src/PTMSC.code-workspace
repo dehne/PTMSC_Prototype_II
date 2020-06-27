@@ -1,0 +1,32 @@
+{
+	"folders": [
+		{
+			"path": "..\\..\\Stepper0"
+		},
+		{
+			"name": "PTMSC Prototype",
+			"path": "..\\..\\PTMSC Prototype"
+		},
+		{
+			"name": "PTMSC Prototype II",
+			"path": ".."
+		},
+		{
+			"name": "PTMSC Proto Calc Speed Test",
+			"path": "..\\..\\PTMSC Proto Calc Speed Test"
+		},
+		{
+			"name": "PTMSC Timer ISR Test",
+			"path": "..\\..\\PTMSC Timer ISR Test"
+		},
+		{
+			"name": "Stepper1",
+			"path": "..\\..\\Stepper1"
+		},
+		{
+			"name": "ResonanceTest",
+			"path": "..\\..\\ResonanceTest"
+		}
+	],
+	"settings": {}
+}

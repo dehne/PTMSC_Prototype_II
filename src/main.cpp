@@ -49,7 +49,7 @@
 #define PIN_3D        (11)
 #define PIN_3P        (12)
 #define PIN_EN        (13)
-#define MAX_SPEED     (500)         // In steps per second
+#define MAX_SPEED     (700)         // In steps per second
 
 // Physical size of flying space (mm) measured from floor and between hoist points
 #define SIZE_X        (950)
@@ -70,7 +70,7 @@
 #define HOME_Z        (650)
 
 // Conversion between mm and steps. (The FlyingPlatform deals exclusively in steps.)
-#define STEPS_PER_REV (400.0)       // What it sounds like
+#define STEPS_PER_REV (800.0)       // What it sounds like
 #define MM_PER_REV (31.51)          // Millimeters of wire travel per revolution
 #define STEPS_PER_MM  (STEPS_PER_REV / MM_PER_REV)  // For 400 / 31.51 that's 12.694
 #define mmToSteps(mm)       ((long)((mm) * STEPS_PER_MM))

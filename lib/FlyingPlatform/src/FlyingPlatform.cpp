@@ -92,9 +92,9 @@ volatile static unsigned long tDsInterval0;
 ISR(TIMER2_COMPA_vect) {
     static byte nFinished = 4;                              // Number of motors finished with this batch
     static long pendingSteps[4];                            // Number of remaining steps by which to change each cable
-    static bool shortening[4];                              // True if shortening cable
-    static unsigned long dsInterval[4];                     // Interval between steps (μs)
-    static unsigned long targetMicros[4] =  {0, 0, 0, 0};   // When to dispatch next step
+    static bool shortening[4];                              // True if shortening the corresponding cable
+    static unsigned long dsInterval[4];                     // Interval between each cable's steps (μs)
+    static unsigned long targetMicros[4] =  {0, 0, 0, 0};   // When to dispatch next step for each cable
 
     if (nFinished == 4 && !nextReady) {                     // No work if finished with batch but no new batch ready
         isrHasWork = false;
@@ -144,14 +144,13 @@ ISR(TIMER2_COMPA_vect) {
         }
         if (pendingSteps[i] == 0) {
             nFinished++;
-        }
-        if (targetMicros[i] < shortestT) {
+        } else if (targetMicros[i] < shortestT) {
             shortestT = targetMicros[i];
         }
     }
 
     isrHasWork = nFinished != 4 || nextReady; // Indicate whether we still have work
-    #ifdef FP_DEBUG_LED
+    #ifdef FP_DEBUG_MTR
     digitalWrite(A5, isrHasWork ? HIGH : LOW);
     #endif
 
@@ -215,8 +214,7 @@ void FlyingPlatform::begin() {
     vHeading = FP_LEVEL;
     vChange = fp_level;
     turnMicros = 0;
-
-    #ifdef FP_DEBUG_LED
+    #if defined(FP_DEBUG_LED) || defined(FP_DEBUG_MTR)
     pinMode(A5, OUTPUT);
     digitalWrite(A5, LOW);
     #endif
@@ -233,6 +231,9 @@ void FlyingPlatform::begin() {
 }
 
 bool FlyingPlatform::run() {
+    #ifdef FP_DEBUG_RU
+    static byte newMoveCount = 0;
+    #endif
     #ifdef FP_DEBUG_ISR
         if (captured && !printed) {
             unsigned long ttm, tcm, tdi;
@@ -301,6 +302,11 @@ bool FlyingPlatform::run() {
         return true;
     }
 
+
+    #ifdef FP_DEBUG_LED
+    digitalWrite(A5, HIGH); // Turn on light at A5
+    #endif
+
     // If we're stopping (and the queued ISR work is finished), we're stopped.
     if (stopping) {
         #ifdef FP_DEBUG_GEO
@@ -344,14 +350,24 @@ bool FlyingPlatform::run() {
 
     // If all done with move and nothing new has been scheduled, no use doing more work.
     if (t == 1.0 && !newMove) {
+
+        #ifdef FP_DEBUG_LED
+        digitalWrite(A5, LOW);
+        #endif
+
         return false;
     }
 
     // If it's time to calculate the next batch of steps
     if (!nextReady) {
         // If we're to go off in a new direction, set up for first batch of the move from wherever we are to target
-        if (newMove) {
+        if (newMove) {            
+            newMove = false;
             source = where();
+            float moveLength = sqrt(
+                (target.x - source.x) * (target.x - source.x) + 
+                (target.y - source.y) * (target.y - source.y) + 
+                (target.z - source.z) * (target.z - source.z));
             #ifdef FP_DEBUG_GEO
             if (source.x < marginsMin.x || source.y < marginsMin.y || source.z < marginsMin.z ||
                 source.x > marginsMax.x || source.y > marginsMax.y || source.z > marginsMax.z) {
@@ -367,16 +383,7 @@ bool FlyingPlatform::run() {
                 Serial.println(vSlope[vHeading]);
             }
             #endif
-            // Start at t = 0 and with the dt needed to have batches consisting of batchSteps steps
-            t = 0.0;
-            float moveLength = sqrt(
-                (target.x - source.x) * (target.x - source.x) + 
-                (target.y - source.y) * (target.y - source.y) + 
-                (target.z - source.z) * (target.z - source.z));
-            dt = 1.0 / (moveLength / batchSteps);   // A batch every batchSteps
-            nextCableSteps = p3DToCb(source);       //   starting at source
-
-            #ifdef FP_DEBUG_GEO
+            #ifdef FP_DEBUG_RU
             Serial.print(F("run() new move. source: ("));
             Serial.print(source.x);
             Serial.print(F(", "));
@@ -389,61 +396,47 @@ bool FlyingPlatform::run() {
             Serial.print(target.y);
             Serial.print(F(", "));
             Serial.print(target.z);
-            Serial.print("), moveLength: ");
-            Serial.print(moveLength);
-            Serial.print(F(", dt: "));
-            Serial.println(dt, 5);
+            Serial.print(") moveLength: ");
+            Serial.println(moveLength);
+            newMoveCount++;
             #endif
 
-            newMove = false;
+            // Start at t = 0 and with the dt needed to have batches consisting of batchSteps steps
+            t = 0.0;
+            dt = 1.0 / (moveLength / batchSteps);   // A batch every batchSteps
+            nextCableSteps = p3DToCb(source);       //   starting at source
+            nextPoint = source;
 
             #ifdef FP_DEBUG_ISR
             captured = false;
             printed = false;
             #endif
+
         }
 
         // Calculate the next batch of steps and mark them as available to the ISR. For the last batch use
         // the cable lengths at target since we could otherwise end at a slightly different place due to
         // errors from limited precision.
         float nextT = min(1.0, t + dt);                         // t for the next batch of steps
-        fp_CableBundle startCableSteps = nextCableSteps;        // Cable lengths at start of the new batch
-        if (nextT < 1.0) {                                      // If it's not the last batch in the move
-            float xsts, sxxsts;                                 //   x(nextT)**2 and (space.x - x(nextT))**2
-            float ysts, syysts;                                 //   y(nextT)**2 and (space.y - y(nextT))**2
-            float szzsts;                                       //   (space.z - z(nextT))**2
-
-            xsts = (1 - nextT) * source.x + nextT * target.x;   //   x(nextT)
-            sxxsts = space.x - xsts;                            //   space.x - x(nextT)
-            ysts = (1 - nextT) * source.y + nextT * target.y;   //   y(nextT)
-            syysts = space.y - ysts;                            //   space.y - y(nextT)
-            xsts *= xsts;                                       //   x(nextT)**2
-            sxxsts *= sxxsts;                                   //   (space.x - x(nextT))**2
-            ysts *= ysts;                                       //   y(nextT)**2
-            szzsts = space.z -                                  //   space.z - z(nextT)
-                ((1 - nextT) * source.z + nextT * target.z);    //     (z(nextT) not needed independently)
-            syysts *= syysts;                                   //   (space.y - y(nextT))**2
-            szzsts *= szzsts;                                   //   (space.z - z(nextT))**2
-            nextCableSteps.c[0] = sqrt(xsts + ysts + szzsts);   //   Set cable lengths at end of batch
-            nextCableSteps.c[1] = sqrt(sxxsts + ysts + szzsts);
-            nextCableSteps.c[2] = sqrt(xsts + syysts + szzsts);
-            nextCableSteps.c[3] = sqrt(sxxsts + syysts + szzsts);
+        fp_CableBundle startCableSteps = nextCableSteps;        // Cable lengths and 
+        if (nextT < 0.999) {                                    // If it's not the last batch in the move
+            nextPoint.x = source.x + nextT * (target.x - source.x);
+            nextPoint.y = source.y + nextT * (target.y - source.y);
+            nextPoint.z = source.z + nextT * (target.z - source.z);
+            nextCableSteps = p3DToCb(nextPoint);
         } else {                                                // Else it's the last batch; use cable lengths at target
             nextCableSteps = p3DToCb(target);
         }
         t = nextT;
         #ifdef FP_DEBUG_GEO
-        long x = (1 - t) * source.x + t * target.x;
-        long y = (1 - t) * source.y + t * target.y;
-        long z = (1 - t) * source.z + t * target.z;
-        if (x < marginsMin.x || y < marginsMin.y || z < marginsMin.z ||
-        x > marginsMax.x || y > marginsMax.y || z > marginsMax.z) {
+        if (nextPoint.x < marginsMin.x || nextPoint.y < marginsMin.y || nextPoint.z < marginsMin.z ||
+            nextPoint.x > marginsMax.x || nextPoint.y > marginsMax.y || nextPoint.z > marginsMax.z) {
             Serial.print(F("run() Heading out of bounds: ("));
-            Serial.print(x);
+            Serial.print(nextPoint.x);
             Serial.print(F(", "));
-            Serial.print(y);
+            Serial.print(nextPoint.y);
             Serial.print(F(", "));
-            Serial.print(z);
+            Serial.print(nextPoint.z);
             Serial.println(F(")"));
         }
         #endif
@@ -462,11 +455,11 @@ bool FlyingPlatform::run() {
         }
         long batchInterval = 1000000.0 * mostSteps / maxSpeed;  // How long (μs) it will take to do batch
         for (byte i = 0; i < 4; i++) {              // Set interval between steps
-            nextDsInterval[i] = nextPendingSteps[i] == 0 ? FP_MAX_JITTER : batchInterval / nextPendingSteps[i];
+            nextDsInterval[i] = nextPendingSteps[i] == 0 ? batchInterval : batchInterval / nextPendingSteps[i];
         }
         #ifdef FP_DEBUG_RU
         Serial.print(F("run() New batch. t: "));
-        Serial.print(t);
+        Serial.print(t, 5);
         Serial.print(F(", pendingSteps: ("));
         for (byte i = 0; i < 4; i++) {
             Serial.print(nextShortening[i] ? -nextPendingSteps[i] : nextPendingSteps[i]);
@@ -475,6 +468,21 @@ bool FlyingPlatform::run() {
         for (byte i = 0; i < 4; i++) {
             Serial.print(nextDsInterval[i]);
             Serial.print(i == 3 ? F(").\n") : F(", "));
+        }
+        #endif
+        #ifdef FP_DEBUG_RU
+        if (t >= 1.0) {
+            Serial.print(F("Last batch. moveCount: "));
+            Serial.print(newMoveCount);
+            Serial.print(F(", pendingSteps: ("));
+            for (byte i = 0; i < 4; i++) {
+                Serial.print(nextShortening[i] ? -nextPendingSteps[i] : nextPendingSteps[i]);
+                Serial.print(i == 3 ? F("), dsInterval: (") : F(", "));
+            }
+            for (byte i = 0; i < 4; i++) {
+                Serial.print(nextDsInterval[i]);
+                Serial.print(i == 3 ? F(").\n") : F(", "));
+            }
         }
         #endif
         nextReady = true;
@@ -499,7 +507,7 @@ fp_return_code FlyingPlatform::setSafetyMargins(
     marginsMin = fp_Point3D {leftMargin, frontMargin, bottomMargin};
     marginsMax = fp_Point3D {space.x - rightMargin, space.y - backMargin, space.z - topMargin};
     targetsMin = fp_Point3D {marginsMin.x + FP_TARGETS_BUFFER, marginsMin.y + FP_TARGETS_BUFFER, marginsMin.z + FP_TARGETS_BUFFER};
-    targetsMax = fp_Point3D {marginsMax.x - FP_TARGETS_BUFFER, marginsMax.y - FP_TARGETS_BUFFER, marginsMax.z + FP_TARGETS_BUFFER};
+    targetsMax = fp_Point3D {marginsMax.x - FP_TARGETS_BUFFER, marginsMax.y - FP_TARGETS_BUFFER, marginsMax.z - FP_TARGETS_BUFFER};
     return fp_ok;
 }
 
@@ -719,110 +727,97 @@ fp_Point3D FlyingPlatform::newTarget() {
     // Figure y intercept
     float by = here.y - (hSlope[hHeading] * here.x);
 
-    // Assume we'll aim to hit the left or right of our allowed space (i.e., max or min x)
+    // Assume we should aim to hit the left or right of our allowed space (i.e., max or min x)
     float x = fp_xIsRising(hHeading) ? targetsMax.x : targetsMin.x;
     float y = hSlope[hHeading] * x + by;
-    byte tgtType = 0;   // Show we're assuming x will be at a margin
+
+    // If that puts x and y at (almost exactly) the same place as here, we're already up 
+    // against the target boundary
+    if (abs(here.x - x) < 1.0 && abs(here.y - y) < 1.0) {
+        #ifdef FP_DEBUG_NT
+        Serial.print(F("newTarget() At boundary from x. here: ("));
+        Serial.print(here.x);
+        Serial.print(F(", "));
+        Serial.print(here.y);
+        Serial.print(F(", "));
+        Serial.print(here.z);
+        Serial.println(F(")."));
+        #endif
+        return here;
+    }
+
+    // Calculate what z is based on vSlope x, here.x, y, here.y and here.z.
+    float z = here.z + vSlope[vHeading] * sqrt((x - here.x) * (x - here.x) + (y - here.y) * (y - here.y));
     float x0 = x;
     float y0 = y;
+    float z0 = z;
 
-    // If that would result in hitting the front or back, assume that's what we hit
-    if (y < targetsMin.y || y > targetsMax.y) {
-        tgtType = 1;    // Show we're assuming y will be at a max or min
-        y = y < targetsMin.y ? targetsMin.y : targetsMax.y;
+    // If aiming at the left or right would result in going beyond the front, 
+    // back, top or bottom and we're not going parallel to the front/back, 
+    // assume we should aim at the front or back. Which it is depends on whether 
+    // x is rising and on hSlope. E.g., when x is rising and hSlope is positive, 
+    // y is also rising so it's the back.
+    if (y < targetsMin.y || y > targetsMax.y || z < targetsMin.z || z > targetsMax.z) {
+        y = fp_xIsRising(hHeading) == (hSlope[hHeading] > 0) ? targetsMax.y : targetsMin.y;
         x = (y - by) / hSlope[hHeading];
     }
+
+    // If that puts x and y at (almost exactly) the same place as here, we're already up 
+    // against the target boundary
+    if (abs(here.x - x) < 1.0 && abs(here.y - y) < 1.0) {
+        #ifdef FP_DEBUG_NT
+        Serial.print(F("newTarget() At boundary from y. here: ("));
+        Serial.print(here.x);
+        Serial.print(F(", "));
+        Serial.print(here.y);
+        Serial.print(F(", "));
+        Serial.print(here.z);
+        Serial.println(F(")."));
+        #endif
+        return here;
+    }
+
+    // Calculate what z is based on vSlope x, here.x, y, here.y and here.z.
+    z = here.z + vSlope[vHeading] * sqrt((x - here.x) * (x - here.x) + (y - here.y) * (y - here.y));
     float x1 = x;
     float y1 = y;
+    float z1 = z;
 
-    // Calculate what z would be based on x and y. It's z = vSlope[vHeading] * (+-sqrt(x**2 + y**2)) + bz
-    // Which it is depends on whether the horoizontal motion is getting closer to or farther from the origin
-    float bz;
-    if ((here.x * here.x + here.y * here.y) - (x * x + y * y) <= 0) {   // If horizontal motion is heading away from origin
-            bz = here.z - vSlope[vHeading] * sqrt(here.x * here.x + here.y * here.y);
-        } else {                                                        // Otherwise horizontal motion is heading towards origin
-            bz = here.z + vSlope[vHeading] * sqrt(here.x * here.x + here.y * here.y);
-        }
-    float z = vSlope[vHeading] * sqrt(x * x + y * y) + bz;
-
-    float z01 = z;
-
-    // Assert: Should not happen
-    if ((vHeading < FP_LEVEL && z > here.z) || (vHeading > FP_LEVEL && z < here.z)) {
-        Serial.print(F("Assertion failed in newTarget(): Wrong vertical direction. here: ("));
-        Serial.print(here.x);
-        Serial.print(F(", "));
-        Serial.print(here.y);
-        Serial.print(F(", "));
-        Serial.print(here.z);
-        Serial.print(F("), target: ("));
-        Serial.print(x);
-        Serial.print(F(", "));
-        Serial.print(y);
-        Serial.print(F(", "));
-        Serial.print(z);
-        Serial.print(F("), hSlope: "));
-        Serial.print(hSlope[hHeading]);
-        Serial.print(F(", vSlope: "));
-        Serial.print(vSlope[vHeading]);
-        Serial.print(F(", by: "));
-        Serial.print(by);
-        Serial.print(F(", bz: "));
-        Serial.println(bz);
-    }
-    //If that would result in hitting the top or bottom, go for that, instead.
+    // If all of the preceeding would result in going beyond the top or bottom, 
+    // aim for the top or bottom.
     if (z < targetsMin.z || z > targetsMax.z) {
-        tgtType = 2;    // Show we're assuming z will be at the max or min
         z = z < targetsMin.z ? targetsMin.z : targetsMax.z;
 
-        #ifdef FP_DEBUG_LL
-        Serial.print(F("newTarget() off bottom or top. here: ("));
-        Serial.print(here.x);
-        Serial.print(F(", "));
-        Serial.print(here.y);
-        Serial.print(F(", "));
-        Serial.print(here.z);
-        Serial.print(F("), hSlope: "));
-        Serial.print(hSlope[hHeading],6);
-        Serial.print(F(", vSlope: "));
-        Serial.print(vSlope[vHeading],6);
-        Serial.print(F("\n  y-based target: ("));
-        Serial.print(x);
-        Serial.print(F(", "));
-        Serial.print(y);
-        Serial.print(F(", "));
-        Serial.print(z);
-        Serial.println(F(")."));
-        #endif
-
-
-        // The distance in the horizontal plane from (here.x, here.y) to the point in x-y where we would
-        // go outside the allowed area given z, here.z and vSlope is d = (z - here.z) / vSlope.
+        // The distance in the x-y plane from (here.x, here.y, here.z) to the point in the x-y 
+        // plane where we would reach z, given vSlope is 
+        //   d = (z - here.z) / vSlope.
         // The square of the same distance in terms of x, here.x, y and here.y is 
-        // d**2 = (x - here.x)**2 + (y - here.y)**2. We also know (y - here.y) / (x - here.x) = hSlope.
+        //   d**2 = (x - here.x)**2 + (y - here.y)**2. 
+        // We also know 
+        //   (y - here.y) / (x - here.x) = hSlope.
         // With these and some algebra we can solve for x in terms of z: 
-        // (z - here.z) / (sqrt(hSlope**2 + 1) * vSlope) + here.x
-        x = (z - here.z) / (sqrt(hSlope[hHeading] * hSlope[hHeading] + 1) * vSlope[vHeading]) + here.x;
-        y =  hSlope[hHeading] * (x - here.x) + here.y;
-
-        #ifdef FP_DEBUG_NT
-        Serial.print(F("  z-based target: ("));
-        Serial.print(x);
-        Serial.print(F(", "));
-        Serial.print(y);
-        Serial.print(F(", "));
-        Serial.print(z);
-        Serial.println(F(")."));
-        #endif
+        //   x = (z - here.z) / (sqrt(hSlope**2 + 1) * vSlope) + here.x
+        x = (z - here.z) / (sqrt(1 + hSlope[hHeading] * hSlope[hHeading]) * vSlope[vHeading]) + here.x;
+        // Since we know hSlope, x and by, finding y is trivial
+        y =  hSlope[hHeading] * x + by;
     }
+
     fp_Point3D answer = {(long)(x + 0.5), (long)(y+ 0.5), (long)(z + 0.5)};
 
-    // Assert: this should not happen
+    #ifdef FP_DEBUG_NT
+    Serial.print(F("newTarget() result is "));
     if (answer.x < marginsMin.x || answer.y < marginsMin.y || answer.z < marginsMin.z ||
         answer.x > marginsMax.x || answer.y > marginsMax.y || answer.z > marginsMax.z) {
-        Serial.print(F("Assertion failed in newTarget(): Target is out of bounds.\n  tgtType: "));
-        Serial.print(tgtType == 0 ? F("x") : tgtType == 1 ? F("y") : F("z"));
-        Serial.print(F("-based, source: ("));
+        Serial.print(F("out of bounds.\n  tgtType: "));
+    } else {
+        Serial.print(F("ok.\n tgeType: "));
+    }
+    #else
+    // Assert: The answer should be inside of the margins
+    if (answer.x < marginsMin.x || answer.y < marginsMin.y || answer.z < marginsMin.z ||
+        answer.x > marginsMax.x || answer.y > marginsMax.y || answer.z > marginsMax.z) {
+        Serial.print(F("Assertion failed in newTarget(): Target is outside the margins.\n  here: ("));
+    #endif
         Serial.print(here.x);
         Serial.print(F(", "));
         Serial.print(here.y);
@@ -834,24 +829,44 @@ fp_Point3D FlyingPlatform::newTarget() {
         Serial.print(answer.y);
         Serial.print(F(", "));
         Serial.print(answer.z);
-        Serial.print(F(")\n  x0: "));
+        Serial.print(F("), margins: (<"));
+        Serial.print(marginsMin.x);
+        Serial.print(F(">-<"));
+        Serial.print(marginsMax.x);
+        Serial.print(F(">, <"));
+        Serial.print(marginsMin.y);
+        Serial.print(F(">-<"));
+        Serial.print(marginsMax.y);
+        Serial.print(F(">, <"));
+        Serial.print(marginsMin.z);
+        Serial.print(F(">-<"));
+        Serial.print(marginsMax.z);
+        Serial.print(F(">)\n  x0: "));
         Serial.print(x0);
         Serial.print(F(", y0: "));
         Serial.print(y0);
+        Serial.print(F(", z0: "));
+        Serial.print(z0);
         Serial.print(F(", x1: "));
         Serial.print(x1);
         Serial.print(F(", y1: "));
         Serial.print(y1);
-        Serial.print(F(", z01: "));
-        Serial.print(z01);
+        Serial.print(F(", z1: "));
+        Serial.print(z1);
+        Serial.print(F(", x is "));
+        Serial.print(fp_xIsRising(hHeading) ? F("rising") : F("falling"));
         Serial.print(F(", hSlope: "));
         Serial.print(hSlope[hHeading]);
         Serial.print(F(", vSlope: "));
-        Serial.println(vSlope[vHeading]);
+        Serial.print(vSlope[vHeading]);
+        Serial.print(F(", by: "));
+        Serial.println(by);
+    #ifndef FP_DEBUG_NT
         while (true) {
             // Spin
         }
     }
+    #endif
     return answer;
 }
 
