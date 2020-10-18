@@ -1,5 +1,5 @@
 /****
- * PTMSCPrototype V0.2, April 2020
+ * PTMSCPrototype V0.4, October 2020
  * 
  * Drive the pinto abalone exhibition prototype simulating a scuba diver doing
  * abalone outplanting using a "flying camera" mechanism simiar in principle 
@@ -40,56 +40,59 @@
 #define DEBUG                       // Uncomment to turn on debugging messages
 
 // For the stepper motors
-#define PIN_0D        (2)
-#define PIN_0P        (3)
-#define PIN_1D        (4)
-#define PIN_1P        (5)
-#define PIN_2D        (6)
-#define PIN_2P        (7)
-#define PIN_3D        (11)
-#define PIN_3P        (12)
-#define PIN_EN        (13)
-#define MAX_SPEED     (700)         // In steps per second
+#define PIN_0D        (4)           // Motor driver 0 (x = 0, y = 0 winch) direction pin
+#define PIN_0P        (5)           //   pulse pin 0
+#define PIN_1D        (6)           // Motor driver 1 (x = SIZE_X, y = 0 winch) direction pin
+#define PIN_1P        (7)           //   pulse pin 1
+#define PIN_2D        (9)           // Motor driver 2 (x = 0, y = SIZE_Y winch) direction pin
+#define PIN_2P        (10)          //   pulse pin 2
+#define PIN_3D        (11)          // Motor driver 3 (x = SIZE-X, y = SIZE_Y winch) direction pin
+#define PIN_3P        (12)          //   pulse pin 3
+#define PIN_EN        (13)          // Enable pin - common to all motor drivers
+#define MAX_SPEED     (800)         // In steps per second
+
+#define CAL_CLK_PIN   (2)           // The pin to which the calReader clock signsal is attached
+#define CAL_DATA_PIN  (3)           // The pin to which the calReader data signal is attached
 
 // Physical size of flying space (mm) measured from floor and between hoist points
-#define SIZE_X        (950)
-#define SIZE_Y        (565)
-#define SIZE_Z        (753)
+#define SIZE_X        (945)
+#define SIZE_Y        (560)
+#define SIZE_Z        (750)
 
 // Safety margins (mm) for left, right, front, back, down and up
 #define MARGIN_L      (25)
 #define MARGIN_R      (25)
 #define MARGIN_F      (20)
 #define MARGIN_B      (20)
-#define MARGIN_D      (20)
+#define MARGIN_D      (150)           // The diver hangs down from the suspension point
 #define MARGIN_U      (20)
 
 // Home location
-#define HOME_X        (474)
-#define HOME_Y        (283)
-#define HOME_Z        (650)
+#define HOME_X        (440)
+#define HOME_Y        (260)
+#define HOME_Z        (610)
 
 // Conversion between mm and steps. (The FlyingPlatform deals exclusively in steps.)
 #define STEPS_PER_REV (800.0)       // What it sounds like
-#define MM_PER_REV (31.51)          // Millimeters of wire travel per revolution
+#define MM_PER_REV    (27.0)        // Millimeters of wire travel per revolution
 #define STEPS_PER_MM  (STEPS_PER_REV / MM_PER_REV)  // For 400 / 31.51 that's 12.694
 #define mmToSteps(mm)       ((long)((mm) * STEPS_PER_MM))
 #define stepsToMm(steps)    ((long)((steps) / STEPS_PER_MM))
 
 // For the control pad
-#define PIN_UP        (9)           // Pin to which "Go down" switch is connected; active low
-#define PIN_DN        (10)          // Pin to which "Go up" switch is connected; active low
-#define PIN_FS        (A1)          // Pin to which "Go forward or Stop" pot  is connected
 #define PIN_LR        (A0)          // Pin to which "Go left, straight or right" pot is connected
+#define PIN_FS        (A1)          // Pin to which "Go forward or Stop" pot  is connected
+#define PIN_DN        (A2)          // Pin to which "Go up" switch is connected; active low
+#define PIN_UP        (A3)          // Pin to which "Go down" switch is connected; active low
 
 // Misc compile-time definitions
-#define BANNER          F("PTMSC Prototype v 0.2")
+#define BANNER          F("PTMSC Prototype v 0.4 October 2020")
 
 // Global variables
 FlyingPlatform diver {
   PIN_0D, PIN_0P, PIN_1D, PIN_1P, 
   PIN_2D, PIN_2P, PIN_3D, PIN_3P, 
-  PIN_EN, 
+  PIN_EN, CAL_CLK_PIN, CAL_DATA_PIN,
   mmToSteps(SIZE_X), mmToSteps(SIZE_Y), mmToSteps(SIZE_Z)};
 UserInput ui {Serial};
 ControlPad cp {PIN_LR, PIN_FS, PIN_UP, PIN_DN};
@@ -154,13 +157,7 @@ void onHelp() {
   Serial.println(F("  move <mmX> <mmY> <mmZ>   Move by the amounts specified"));
   Serial.println(F("  m <mmX> <mmY> <mmZ>      Same as move."));
   Serial.println(F("  setHome                  Assume the current position is home."));
-  Serial.print(  F("                             (x: "));
-  Serial.print(HOME_X);
-  Serial.print(F("mm, y: "));
-  Serial.print(HOME_Y);
-  Serial.print(F("mm, z: "));
-  Serial.print(HOME_Z);
-  Serial.println(F("mm)"));
+  Serial.println(F("  calibrate                Move to the sensor-defined home position."));
   Serial.println(F("  go                       Start the diver moving on its current heading."));
   Serial.println(F("  stop                     Stop all movement. Heading remains as is."));
   Serial.println(F("  s                        Same as stop command."));
@@ -189,6 +186,18 @@ void onGo() {
 void onSethome(){
   interpretRc(diver.setCurrentPosition(fp_Point3D {mmToSteps(HOME_X), mmToSteps(HOME_Y), mmToSteps(HOME_Z)}));
   Serial.print(F("Home set to ("));
+  Serial.print(HOME_X);
+  Serial.print(F(", "));
+  Serial.print(HOME_Y);
+  Serial.print(F(", "));
+  Serial.print(HOME_Z);
+  Serial.println(F(")"));
+}
+
+// calibrate
+void onCalibrate() {
+  interpretRc(diver.calibrate(fp_Point3D {mmToSteps(HOME_X), mmToSteps(HOME_Y), mmToSteps(HOME_Z)}));
+  Serial.print(F("Calibrating to ("));
   Serial.print(HOME_X);
   Serial.print(F(", "));
   Serial.print(HOME_Y);
@@ -354,6 +363,7 @@ void setup() {
   ui.attachCmdHandler("move", onMove) &&
   ui.attachCmdHandler("m", onMove) &&
   ui.attachCmdHandler("sethome", onSethome) &&
+  ui.attachCmdHandler("calibrate", onCalibrate) &&
   ui.attachCmdHandler("home", onHome) &&
   ui.attachCmdHandler("stop", onStop) &&
   ui.attachCmdHandler("s", onStop) &&
@@ -374,6 +384,8 @@ void setup() {
   cp.attachHandler(upReleased, onUpOrDownReleased);
   cp.attachHandler(downReleased, onUpOrDownReleased);
   cp.attachHandler(downPressed, onDownPressed);
+
+  Serial.println(F("Type \"h\" for list of commands."));
 }
 
 /**
