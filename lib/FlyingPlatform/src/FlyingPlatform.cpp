@@ -11,7 +11,7 @@
  *
  *****
  * 
- * FlyingPlatform V0.3, May 2020
+ * FlyingPlatform V0.4, October 2020
  * Copyright (C) 2020 D.L. Ehnebuske
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -40,8 +40,8 @@
 
 /**
  * 
- * Variables held in common with the ISR. I don't like this, but I can find no 
- * clean way of sharing variables with an ISR.
+ * Variables held in common with the ISRs. I don't like this, but I can find no 
+ * clean way of sharing variables with ISRs.
  * 
  **/
 volatile static bool nextReady;             // Lock for sharing nextXxxx variables. true => ISR owns false => run()
@@ -49,10 +49,19 @@ static bool nextShortening[4];              // Buffer for Whether the cable is s
 static long nextPendingSteps[4];            // Buffer for pendingSteps in next batch of steps
 static unsigned long nextDsInterval[4];     // Buffer for interval between steps (μs) in next batch
 
-volatile static bool isrHasWork;            // True if ISR still has steps to take. (Owned by ISR)
+volatile static bool timerISRHasWork;       // True if timer ISR still has steps to take. (Owned by ISR)
 volatile static long cableSteps[4];         // The current length of the cables, in steps (Owned by ISR; use ATOMIC access)
 static byte dirPin[4];                      // Direction digital output pins. High means lengthen cables (Owned by object)
 static byte stepPin[4];                     // Step digital output pins. Normally LOW. Pulse HIGH to step. (Owned by object)
+volatile static bool isEnabled;             // Whether motor drivers are enabled
+volatile static bool isCalibrated;          // True if we know where the platform is
+volatile bool isCalibrating;                // True if calibration is underway
+enum calStates : byte {cal_start, cal_goingRight, cal_goingLeft, cal_aBitMore, cal_done};
+volatile calStates state[4];                // Current state of the state machines
+volatile int aBitMore[4];                   // The number of additional steps taken in state cal_aBitMore ()
+static byte calClkPin;                      // The calReader clock pin
+static byte calDataPin;                     // The calReader data pin
+static int calData;                         // The data received from calReader (Owned by calClkISR)
 
 #ifdef FP_DEBUG_ISR
 volatile static bool captured = false;
@@ -65,9 +74,9 @@ volatile static unsigned long tDsInterval0;
 
 /**
  * 
- * Interrupt service routine. Invoked whenever the count in Timer 2 reaches 
- * the value specified in register OCR2A. Because Timer 2 is set up (in 
- * begin()) to tick once every 2μs and OCR2A is an 8-bit register, the 
+ * Timer interrupt service routine. Invoked whenever the count in Timer 2 
+ * reaches the value specified in register OCR2A. Because Timer 2 is set up 
+ * (in begin()) to tick once every 2μs and OCR2A is an 8-bit register, the 
  * longest we can go between interrupts is 512μs. We adjust OCR2A as needed 
  * to cause interrupts at shorter intervals.
  * 
@@ -97,7 +106,7 @@ ISR(TIMER2_COMPA_vect) {
     static unsigned long targetMicros[4] =  {0, 0, 0, 0};   // When to dispatch next step for each cable
 
     if (nFinished == 4 && !nextReady) {                     // No work if finished with batch but no new batch ready
-        isrHasWork = false;
+        timerISRHasWork = false;
         return;
     }
     unsigned long curMicros = micros();
@@ -107,9 +116,9 @@ ISR(TIMER2_COMPA_vect) {
             pendingSteps[i] = nextPendingSteps[i];
             shortening[i] = nextShortening[i];
             if (shortening[i]) {
-                digitalWrite(dirPin[i], LOW);   // Set to shorten cable
+                digitalWrite(dirPin[i], FP_SHORTEN);   // Set to shorten cable
             } else {
-                digitalWrite(dirPin[i], HIGH);  // Set to lengthen cable
+                digitalWrite(dirPin[i], FP_LENGTHEN);  // Set to lengthen cable
             }
             dsInterval[i] = nextDsInterval[i];
             if (curMicros > targetMicros[i]) {
@@ -149,9 +158,9 @@ ISR(TIMER2_COMPA_vect) {
         }
     }
 
-    isrHasWork = nFinished != 4 || nextReady; // Indicate whether we still have work
+    timerISRHasWork = nFinished != 4 || nextReady; // Indicate whether we still have work
     #ifdef FP_DEBUG_MTR
-    digitalWrite(A5, isrHasWork ? HIGH : LOW);
+    digitalWrite(A5, timerISRHasWork ? HIGH : LOW);
     #endif
 
 
@@ -167,12 +176,93 @@ ISR(TIMER2_COMPA_vect) {
     }
 }
 
+/**
+ * 
+ * Interrupt service routine used during calibration. This ISR is attached to 
+ * CAL_CLK_PIN when it's time to calibrate. It steps the motors to move the 
+ * platform to the position defined by the home photo interrupters on each 
+ * cable winch. Once the position is reached, the ISR detaches itself. See 
+ * calReader sketch for details.
+ * 
+ * To do a calibration
+ *      1. Only do this if isCalibrating == false
+ *      2. Attach the ISR: attachInterrupt(digitalPinToInterrupt(calClkPin), calClkISR, RISING);
+ *      3. Don't try to run the motors while isCalibrating is true
+ * 
+ * To stop a calibration already in progress
+ *      1. Detach the interrupt: detachInterrupt(digitalPinToInterrupt(calClkPin));
+ *      2. Set isCalibrating = false;
+ * 
+ **/
+void calClkISR() {
+  if (!isCalibrating) {
+    isCalibrating = true;
+    isCalibrated = false;
+    state[0] = state[1] = state[2] = state[3] = cal_start;
+  }
+  calData = (calData << 1) | digitalRead(calDataPin);
+  if ((calData & FP_CAL_SYNC_MASK) == FP_CAL_SYNC) {
+    byte doneCount = 0;
+    for (byte cable = 0; cable < 4; cable++) {
+      // calData: 0bxxxxxxx11110abcd where a is bit for cable 0; b is for 1; ...
+      byte reading = (calData >> (3 - cable) & 1);
+      switch (state[cable]) {
+        case cal_start:
+          aBitMore[cable] = 0;
+          if (reading == FP_CAL_ROC) {
+            state[cable] = cal_goingLeft;
+          } else {
+            state[cable] = cal_goingRight;
+          }
+          break;
+        case cal_goingRight:
+          if (reading == FP_CAL_ROC) {
+            state[cable] = cal_done;
+          } else {
+            digitalWrite(dirPin[cable], FP_SHORTEN);
+            digitalWrite(stepPin[cable], HIGH);
+            digitalWrite(stepPin[cable], LOW);
+          }
+          break;
+        case cal_goingLeft:
+          if (reading == FP_CAL_LOC) {
+            state[cable] = cal_aBitMore;  
+          } else {
+            digitalWrite(dirPin[cable], FP_LENGTHEN);
+            digitalWrite(stepPin[cable], HIGH);
+            digitalWrite(stepPin[cable], LOW);
+          }
+          break;
+        case cal_aBitMore:
+          if (++aBitMore[cable] >= FP_CAL_MORE) {
+            state[cable] = cal_goingRight;
+          } else {
+            digitalWrite(dirPin[cable], FP_LENGTHEN);
+            digitalWrite(stepPin[cable], HIGH);
+            digitalWrite(stepPin[cable], LOW);
+          }
+          break;
+        case cal_done:
+          doneCount++;
+          break;
+      }
+    }
+    if (doneCount == 4) {
+      detachInterrupt(digitalPinToInterrupt(calClkPin));
+      isCalibrating = false;
+      isCalibrated = true;
+    }
+  }
+    return;
+}
+
 FlyingPlatform::FlyingPlatform(
     byte pin0D, byte pin0P, 
     byte pin1D, byte pin1P, 
     byte pin2D, byte pin2P, 
     byte pin3D, byte pin3P,
     byte pinEn,
+    byte pinCC, byte pinCD,
     long spaceWidth, long spaceDepth, long spaceHeight) {
         dirPin[0] = pin0D;
         dirPin[1] = pin1D;
@@ -183,6 +273,8 @@ FlyingPlatform::FlyingPlatform(
         stepPin[2] = pin2P;
         stepPin[3] = pin3P;
         enablePin = pinEn;
+        calClkPin = pinCC;
+        calDataPin = pinCD;
         space = fp_Point3D {spaceWidth, spaceDepth, spaceHeight};
         marginsMin = fp_Point3D {0, 0, 0};
         marginsMax = fp_Point3D {spaceWidth, spaceDepth, spaceHeight};
@@ -195,12 +287,16 @@ void FlyingPlatform::begin() {
     for (byte i = 0; i < 4; i++) {
         pinMode(dirPin[i], OUTPUT);
         pinMode(stepPin[i], OUTPUT);
-        cableSteps[i] = 0;          // ISR not yet running; no ATOMIC stuff needed
+        cableSteps[i] = 0;          // timer ISR not yet running; no ATOMIC stuff needed
         nextPendingSteps[i] = 0;
         nextDsInterval[i] = 0;
         nextShortening[i] = false;
     }
-    currentIsSet = false;
+    pinMode(calClkPin, INPUT);
+    pinMode(calDataPin, INPUT);
+    isCalibrated = false;
+    isCalibrating = false;
+    calData = 0;
     digitalWrite(enablePin, LOW);   // Enable (active LOW) motor drivers
     isEnabled = true;
 
@@ -252,7 +348,7 @@ bool FlyingPlatform::run() {
         }
     #endif
     
-    if (!currentIsSet || !isEnabled) {
+    if (!isCalibrated || !isEnabled) {
         return false;
     }
     unsigned long curMicros = micros();
@@ -291,14 +387,14 @@ bool FlyingPlatform::run() {
                 break;
         }
         // If there's a new heading and we're going and we're not trying to stop
-        if (changed && isrHasWork && !stopping) {
+        if (changed && timerISRHasWork && !stopping) {
             moveTo(newTarget());
         }
         turnMicros = curMicros;
     }
 
     // If we're stopping, no further work until the queued ISR work finishes
-    if (stopping && isrHasWork) {
+    if (stopping && timerISRHasWork) {
         return true;
     }
 
@@ -541,8 +637,20 @@ fp_return_code FlyingPlatform::setCurrentPosition (fp_Point3D tgt) {
     hHeading = 0;
     vHeading = FP_LEVEL;
 
-    currentIsSet = true;
+    isCalibrated = true;
     return fp_ok;;
+}
+
+fp_return_code FlyingPlatform::calibrate(fp_Point3D tgt) {
+    if (!isEnabled) {
+        return fp_dis;
+    }
+    fp_return_code rc = setCurrentPosition(tgt);
+    if (rc != fp_ok) {
+        return rc;
+    }
+    attachInterrupt(digitalPinToInterrupt(calClkPin), calClkISR, RISING);
+    return fp_ok;
 }
 
 fp_return_code FlyingPlatform::enableOutputs() {
@@ -586,7 +694,7 @@ fp_return_code FlyingPlatform::moveTo(fp_Point3D tgt) {
         #endif
         return fp_oob;      // Can't do it: Target is out of bounds
     }
-    if (!currentIsSet) {
+    if (!isCalibrated) {
         return fp_ncp;          // Can't do it: No current position set
     }
     // Okay, go for it: Set things up to move to tgt
@@ -613,7 +721,7 @@ fp_return_code FlyingPlatform::moveTo(fp_Point3D tgt) {
 }
 
 fp_return_code FlyingPlatform::moveBy(fp_Point3D delta) {
-    if (!currentIsSet) {
+    if (!isCalibrated) {
         return fp_ncp;
     }
     fp_Point3D current = where();
@@ -638,7 +746,7 @@ fp_return_code FlyingPlatform::moveBy(fp_Point3D delta) {
 }
 
 fp_return_code FlyingPlatform::go() {
-    if (!currentIsSet) {
+    if (!isCalibrated) {
         return fp_ncp;
     }
     return moveTo(newTarget());
@@ -662,10 +770,14 @@ fp_return_code FlyingPlatform::turn(fp_vTurns dir) {
 
 void FlyingPlatform::stop() {
     stopping = true;
+    detachInterrupt(digitalPinToInterrupt(calClkPin));  // Also stop calibration, if it's running
+    isCalibrating = false;
+    isCalibrated = false;
+
 }
 
 fp_Point3D FlyingPlatform::where() {
-    if (!currentIsSet) {
+    if (!isCalibrated) {
         return fp_Point3D {0, 0, 0};
     }
     fp_CableBundle cs;
@@ -699,12 +811,12 @@ fp_Point3D FlyingPlatform::where() {
 }
 
 bool FlyingPlatform::isRunning() {
-    return isrHasWork;
+    return timerISRHasWork;
 }
 
 fp_Point3D FlyingPlatform::newTarget() {
     fp_Point3D here;
-    if (isrHasWork) {
+    if (timerISRHasWork) {
         here = cbToP3D(nextCableSteps); // If we're running, we'll start with next batch
     } else {
         here = where();                 // If we're stopped, we'll start where we are
@@ -757,7 +869,7 @@ fp_Point3D FlyingPlatform::newTarget() {
     // assume we should aim at the front or back. Which it is depends on whether 
     // x is rising and on hSlope. E.g., when x is rising and hSlope is positive, 
     // y is also rising so it's the back.
-    if (y < targetsMin.y || y > targetsMax.y || z < targetsMin.z || z > targetsMax.z) {
+    if (y < marginsMin.y || y > marginsMax.y || z < marginsMin.z || z > marginsMax.z) {
         y = fp_xIsRising(hHeading) == (hSlope[hHeading] > 0) ? targetsMax.y : targetsMin.y;
         x = (y - by) / hSlope[hHeading];
     }
@@ -785,7 +897,7 @@ fp_Point3D FlyingPlatform::newTarget() {
 
     // If all of the preceeding would result in going beyond the top or bottom, 
     // aim for the top or bottom.
-    if (z < targetsMin.z || z > targetsMax.z) {
+    if (z < marginsMin.z || z > marginsMax.z) {
         z = z < targetsMin.z ? targetsMin.z : targetsMax.z;
 
         // The distance in the x-y plane from (here.x, here.y, here.z) to the point in the x-y 
@@ -796,8 +908,13 @@ fp_Point3D FlyingPlatform::newTarget() {
         // We also know 
         //   (y - here.y) / (x - here.x) = hSlope.
         // With these and some algebra we can solve for x in terms of z: 
-        //   x = (z - here.z) / (sqrt(hSlope**2 + 1) * vSlope) + here.x
-        x = (z - here.z) / (sqrt(1 + hSlope[hHeading] * hSlope[hHeading]) * vSlope[vHeading]) + here.x;
+        //   x = here.x + (z - here.z) / (sqrt(hSlope**2 + 1) * (+-)vSlope)
+        // the vSlope term is + if x is rising, - if it is falling
+        if (fp_xIsRising(hHeading)){
+            x = here.x + (z - here.z) / (sqrt(1 + hSlope[hHeading] * hSlope[hHeading]) * vSlope[vHeading]);
+        } else {
+            x = here.x - (z - here.z) / (sqrt(1 + hSlope[hHeading] * hSlope[hHeading]) * vSlope[vHeading]);
+        }
         // Since we know hSlope, x and by, finding y is trivial
         y =  hSlope[hHeading] * x + by;
     }

@@ -58,7 +58,7 @@
  * 
  *****
  * 
- * FlyingPlatform V0.3, May 2020
+ * FlyingPlatform V0.4, October 2020
  * Copyright (C) 2020 D.L. Ehnebuske
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -116,7 +116,13 @@
     #define FP_TURN_INTERVAL    (250000)    // Heading change interval (in μs)
     #define FP_MAX_JITTER       (75)        // Maximum jitter (μs) in dispatching a step
     #define FP_TARGETS_BUFFER   (100)       // Number of steps between a target and a margin
-
+    #define FP_CAL_SYNC         (0x01E0)    // calReader sync when complete packet received
+    #define FP_CAL_SYNC_MASK    (0x01F0)    // Mask for FP_CAL_SYNC
+    #define FP_CAL_ROC          (0)         // calReader bitcode for right-of-center
+    #define FP_CAL_LOC          (1)         // calReader bitcode for left-of-center
+    #define FP_CAL_MORE         (100)        // Number of steps required to eliminate backlash
+    #define FP_SHORTEN          (LOW)       // dirPin value to shorten cable (moves carriage right)
+    #define FP_LENGTHEN         (HIGH)      // dirPin value to lengthen cable (moves carriage left)
 
     /**
      * 
@@ -162,8 +168,8 @@
      * fp_ok:   Things went well
      * fp_oob:  The resulting move would have moved the platform outside of 
      *          the safe area. No movement was made.
-     * fp_ncp:  The current position has not been set, so the platform can't 
-     *          be moved. 
+     * fp_ncp:  The current position has not been set (i.e., we're not 
+     *          calibrated), so the platform can't be moved. 
      * fp_dis:  The steppers are disabled, so the platform can't be moved.
      * fp_mov:  The operation can't be done because a move is underway.
      * fp_nom:  The operation can't be done because no move is underway.
@@ -197,6 +203,8 @@
              *  pin3D       Same but for stepper 3
              *  pin4P
              *  pinEn       Enable pin -- common to all steppers. Active low.
+             *  pinCC       The calReader clock pin
+             *  pinCD       The calReader data pin
              *  spaceWidth  The width, in steps, of the space in which the 
              *              platform operates
              *  spaceDepth  Its depth
@@ -208,7 +216,8 @@
                 byte pin1D, byte pin1P, 
                 byte pin2D, byte pin2P, 
                 byte pin3D, byte pin3P,
-                byte pinEn,
+                byte pinEn, 
+                byte pinCC, byte pinCD,
                 long spaceWidth, long spaceDepth, long spaceHeight);
 
             /**
@@ -288,7 +297,7 @@
              * space and reset the headings. That is, don't move anything, 
              * just assume that the platform is at the position specified, set 
              * the assumed length of the cables to match that, and set 
-             * hHeading to 0, vHeading to FD_LEVEL.
+             * hHeading to 0, vHeading to FP_LEVEL.
              * 
              * Returns fp_ok if all went well, fp_oob if the specified 
              * position is out of bounds of the safety margins or fp_mov if the 
@@ -297,6 +306,20 @@
              * 
              **/
             fp_return_code setCurrentPosition (fp_Point3D tgt);
+
+            /**
+             * 
+             * Calibrate the system. That is, move the platform to the 
+             * sensor-defined "home" position and set the current position to 
+             * the given location.
+             * 
+             * Returns fp_ok if all went well, fp_oob if the specified 
+             * position is out of bounds of the safety margins or fp_mov if the 
+             * platform is currently moving. No change to the current location 
+             * is made if fp_ok is not returned.
+             * 
+             **/
+            fp_return_code calibrate(fp_Point3D tgt);
 
             /**
              * 
@@ -516,8 +539,6 @@
             bool stopping;                      // True if waiting for the current batch to finish so we can stop
 
             float maxSpeed;                     // Max speed in steps per second.
-            bool currentIsSet;                  // Whether cableSteps[] has been initialized
-            bool isEnabled;                     // Whether motor drivers are enabled
 
             /**
              * 
